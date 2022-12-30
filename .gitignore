@@ -1,0 +1,7 @@
+real-config.json
+.lh
+dist
+.vscode
+sbo_sr_live_catalog.json
+__pycache__
+
