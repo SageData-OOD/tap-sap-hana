@@ -147,23 +147,53 @@ class SapHanaStream(SQLStream):
 
     connector_class = SapHanaConnector
 
-    def get_records(self, partition: Optional[dict]) -> Iterable[Dict[str, Any]]:
+    # Get records from stream
+    def get_records(self, context: dict | None) -> Iterable[dict[str, Any]]:
         """Return a generator of record-type dictionary objects.
 
-        Developers may optionally add custom logic before calling the default
-        implementation inherited from the base class.
+        If the stream has a replication_key value defined, records will be sorted by the
+        incremental key. If the stream also has an available starting bookmark, the
+        records will be filtered for values greater than or equal to the bookmark value.
 
         Args:
-            partition: If provided, will read specifically from this data slice.
+            context: If partition context is provided, will read specifically from this
+                data slice.
 
         Yields:
             One dict per record.
+
+        Raises:
+            NotImplementedError: If partition is passed in context and the stream does
+                not support partitioning.
         """
-        # Optionally, add custom logic instead of calling the super().
-        # This is helpful if the source database provides batch-optimized record
-        # retrieval.
-        # If no overrides or optimizations are needed, you may delete this method.
-        yield from super().get_records(partition)
+        if context:
+            raise NotImplementedError(
+                f"Stream '{self.name}' does not support partitioning."
+            )
+
+        selected_column_names = self.get_selected_schema()["properties"].keys()
+        table = self.connector.get_table(
+            full_table_name=self.fully_qualified_name,
+            column_names=selected_column_names,
+        )
+        query = table.select()
+
+        if self.replication_key:
+            replication_key_col = table.columns[self.replication_key]
+            query = query.order_by(replication_key_col)
+
+            start_val = self.get_starting_replication_key_value(context)
+            if start_val:
+                # DP: for whatever reason late parameter binding doesn't work for hdbcli
+                query = query.where(
+                    sqlalchemy.text(f"\"{self.replication_key}\" >= '{start_val}'")
+                )
+
+        if self._MAX_RECORDS_LIMIT is not None:
+            query = query.limit(self._MAX_RECORDS_LIMIT)
+
+        for record in self.connector.connection.execute(query):
+            yield dict(record)
 
     def get_batches(
         self,
