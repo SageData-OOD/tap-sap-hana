@@ -5,12 +5,9 @@ This includes SapHanaStream and SapHanaConnector.
 from __future__ import annotations
 from copy import deepcopy
 
-import gzip
 import json
-from datetime import datetime
-from uuid import uuid4
-from typing import Any, Dict, Iterable, Optional
-
+from typing import Any, Iterable, Generator
+import time
 # import pendulum
 
 import sqlalchemy
@@ -19,12 +16,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 
 
+import singer_sdk._singerlib as singer
 from singer_sdk import SQLConnector, SQLStream
-from singer_sdk.helpers._batch import (
-    BaseBatchFileEncoding,
-    BatchConfig,
-)
-from singer_sdk.streams.core import lazy_chunked_generator
 
 
 class SapHanaConnector(SQLConnector):
@@ -115,6 +108,23 @@ class SapHanaStream(SQLStream):
 
     connector_class = SapHanaConnector
 
+    def _generate_record_messages(
+        self,
+        record: dict,
+    ) -> Generator[singer.RecordMessage, None, None]:
+        """Write out a RECORD message.
+
+        Args:
+            record: A single stream record.
+
+        Yields:
+            Record message objects.
+        """
+        for record_message in SQLStream._generate_record_messages(self, record):
+            if not self.replication_key:
+                record_message.version = self.version
+            yield record_message
+
     # Get records from stream
     def get_records(self, context: dict | None) -> Iterable[dict[str, Any]]:
         """Return a generator of record-type dictionary objects.
@@ -156,9 +166,15 @@ class SapHanaStream(SQLStream):
                 query = query.where(
                     sqlalchemy.text(f"\"{self.replication_key}\" >= '{start_val}'")
                 )
-
-        if self._MAX_RECORDS_LIMIT is not None:
-            query = query.limit(self._MAX_RECORDS_LIMIT)
+        else:
+            # emit ACTIVATE_VERSION message for fulltable replication
+            self.version = int(time.time() * 1000)
+            singer.write_message(singer.ActivateVersionMessage(stream=self.name, version=self.version))
 
         for record in self.connector.connection.execute(query):
             yield dict(record)
+
+        # emit ACTIVATE_VERSION message at end of iteration for streams
+        # with full table replication
+        if not self.replication_key:
+            singer.write_message(singer.ActivateVersionMessage(stream=self.name, version=self.version))
